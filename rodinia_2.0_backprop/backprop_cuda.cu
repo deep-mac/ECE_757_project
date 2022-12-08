@@ -83,6 +83,9 @@ void bpnn_train_cuda(BPNN *net, float *eo, float *eh)
   dim3  grid( 1 , num_blocks);
   printf("Num_blocks = %d\n", num_blocks);
   dim3  threads(16 , 16);
+
+  float **approx_shmem;
+  struct shmemTableEntry **shmemTable;
   
   input_weights_one_dim = (float *) malloc((in + 1)* (hid + 1) * sizeof(float));
   input_weights_prev_one_dim = (float *) malloc((in + 1)* (hid + 1) * sizeof(float));
@@ -96,7 +99,23 @@ void bpnn_train_cuda(BPNN *net, float *eo, float *eh)
 	  m++;
     }
   }
-  
+ 
+  //FIXME figure out a way to allocate all pointers in the cuda memory itself. Looks like this way, GPU array is pointing towards host addresses.
+  float **h_approx_shmem = (float**)malloc(num_blocks*sizeof(float*));
+  struct shmemTableEntry **h_shmemTable = (struct shmemTableEntry**)malloc(num_blocks*sizeof(struct shmemTableEntry*));
+  printf("Malloc 1\n");
+  for (int blks = 0; blks < num_blocks; blks++) {
+      cudaMalloc((void**)&h_approx_shmem[blks], (SHMEM_NUM_BANKS*SHMEM_ELEMENTS_PER_BANK) * sizeof(float));
+      cudaMalloc((void**)&h_shmemTable[blks], (SHMEM_NUM_BANKS*SHMEM_TABLE_NUM_ENTRIES) * sizeof(struct shmemTableEntry));
+  }
+  printf("Malloc 2\n");
+
+  cudaMalloc((void***)&approx_shmem, num_blocks*sizeof(float*));
+  cudaMalloc((void***)&shmemTable, num_blocks*sizeof(struct shmemTableEntry*));
+  cudaMemcpy(approx_shmem, h_approx_shmem, num_blocks*sizeof(float*), cudaMemcpyHostToDevice);
+  cudaMemcpy(shmemTable, h_shmemTable, num_blocks*sizeof(struct shmemTableEntry*), cudaMemcpyHostToDevice);
+  printf("Malloc 3\n");
+
   cudaMalloc((void**) &input_cuda, (in + 1) * sizeof(float));
   cudaMalloc((void**) &output_hidden_cuda, (hid + 1) * sizeof(float));
   cudaMalloc((void**) &input_hidden_cuda, (in + 1) * (hid + 1) * sizeof(float));
@@ -121,6 +140,14 @@ void bpnn_train_cuda(BPNN *net, float *eo, float *eh)
   cudaMemcpy(input_cuda, net->input_units, (in + 1) * sizeof(float), cudaMemcpyHostToDevice);
   cudaMemcpy(input_hidden_cuda, input_weights_one_dim, (in + 1) * (hid + 1) * sizeof(float), cudaMemcpyHostToDevice);
 
+  /*  for (int blk = 0; blk < num_blocks; blk++){
+        for (int b = 0; b < SHMEM_NUM_BANKS; b++) {
+            for (int c = 0; c <  SHMEMSIZE/4/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE; c++) {
+                shmemTable[blk][b][c].paddr = c;
+                shmemTable[blk][b][c].vaddrQueue = NULL;
+            }
+       }
+   }*/
   
   
   bpnn_layerforward_CUDA<<< grid, threads >>>(input_cuda,
@@ -128,7 +155,9 @@ void bpnn_train_cuda(BPNN *net, float *eo, float *eh)
 											  input_hidden_cuda,
 											  hidden_partial_sum,
 											  in,
-											  hid);
+											  hid, 
+                                              approx_shmem, 
+                                              shmemTable);
  
   cudaThreadSynchronize();
   
@@ -186,7 +215,7 @@ void bpnn_train_cuda(BPNN *net, float *eo, float *eh)
   FILE* ofile = fopen("result.txt", "w");
   unsigned long long int checksum = 0; 
   for (int x = 0; x < (in + 1) * (hid + 1); x++) {
-    printf("input_weights[%d] = %g\n", x, input_weights_one_dim[x]);  // uncomment for detail debug 
+    //printf("input_weights[%d] = %g\n", x, input_weights_one_dim[x]);  // uncomment for detail debug 
 	fprintf(ofile, "input_weights[%d] = %.3f\n", x, input_weights_one_dim[x]);
     checksum += ((unsigned int *)input_weights_one_dim)[x]; 
   }

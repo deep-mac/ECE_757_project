@@ -9,8 +9,6 @@
 #include "math.h"
 #include "cuda.h"
 
-//typedef struct shmemTableEntry;
-
 struct queueNode{
     long unsigned int vaddr;
     struct queueNode* next;
@@ -134,16 +132,8 @@ __device__ int getValueQueue(struct queueNode **q, int index)
     return (ptr->vaddr);
 }
 
-struct shmemTableEntry {
-    int valid;
-    struct queueNode *vaddrQueue;
-    int paddr;
-    float hash[3]; //0 = min, 1 = max, 2 = avg
-    int status; //0000 = empty, 0001 = only first, 0010 = only second, 0100 = only third, 1000 only 4th, 1111 = all
-} ;
 
-
-__device__ float getApproxShmem(float *input_vaddr, float approx_shmem[][SHMEM_ELEMENTS_PER_BANK], struct shmemTableEntry shmemTable[][SHMEM_TABLE_NUM_ENTRIES]) {
+__device__ float getApproxShmem(float *input_vaddr, float **approx_shmem, struct shmemTableEntry **shmemTable, int by) {
     int b;
     long unsigned int vaddr = (long unsigned int)input_vaddr;
     //This is because data type is 4 bytes
@@ -152,16 +142,17 @@ __device__ float getApproxShmem(float *input_vaddr, float approx_shmem[][SHMEM_E
     b = vaddr % 32;
     vaddr = vaddr >> 5;
     float value = 0;
+    //int by = blockDim.y;
     
     for (int i = 0; i < SHMEMSIZE/4/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE; i++){
-        if (shmemTable[b][i].valid) {
+        if (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].valid) {
             //printf("In getApproxShmem, Found valid entry\n");
             //printf("Vaddr = %x\n", vaddr>>2);
-            int idx = findInQueue(&shmemTable[b][i].vaddrQueue, vaddr >> 2, 0);
+            int idx = findInQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, vaddr >> 2, 0);
             if (idx != -1) {  //There is a match so check for status
                 //there is match
                 //printf("In getApproxShmem, Found entry in queue\n");
-                value = approx_shmem[b][shmemTable[b][i].paddr << 2 + (vaddr & 3)];
+                value = approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+ ((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr << 2) + (vaddr & 3))];
                 break;
             }
         }
@@ -170,7 +161,7 @@ __device__ float getApproxShmem(float *input_vaddr, float approx_shmem[][SHMEM_E
     return value;
 }
 
-__device__ void approxShmem(float weight[][WIDTH], float approx_shmem[][SHMEM_ELEMENTS_PER_BANK], struct shmemTableEntry shmemTable[][SHMEM_TABLE_NUM_ENTRIES], int bx, int by, int tx, int ty, float *input_vaddr){
+__device__ void approxShmem(float weight[][WIDTH], float **approx_shmem, struct shmemTableEntry **shmemTable, int bx, int by, int tx, int ty, float *input_vaddr){
    
     int b; //b = bank
     long unsigned int vaddr = (long int)input_vaddr;
@@ -223,62 +214,71 @@ __device__ void approxShmem(float weight[][WIDTH], float approx_shmem[][SHMEM_EL
     chunk_vaddr = vaddr >> 2;
     //FIXME - the vaddr&3 will need to change based on the chunk size. It will become SHMEM_CHUNK_SIZE-1
     //FIXME chunk_vaddr = vaddr >> 2 will change when we change chunk size
+
+    printf("Invoked function approxShmem b = %d, tx = %d, ty=%d, bx= %d, by=%d, chunk_addr = %lx, vaddr = %lx\n", b, tx, ty, bx, by, chunk_vaddr, vaddr);
     for (int i = 0; i< SHMEMSIZE/4/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE; i++){
-        if(shmemTable[b][i].valid == 1) //&& shmemTable[i].status == < 4) //Check whether there is anything valid and partial
+        if(shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].valid == 1) //Check whether there is anything valid and partial
         {
             int idx;
             if (b == 0 && bx == 0 && by == 0) {
                 printf("Inside valid shmemtable entry, chunk_addr = %lx, vaddr = %lx\n", chunk_vaddr, vaddr);
             }
-            idx = findInQueue(&shmemTable[b][i].vaddrQueue, chunk_vaddr, 0);
+            idx = findInQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, chunk_vaddr, 0);
             if (b == 0 && bx == 0 && by == 0) 
                 printf("After find idx = %d\n", idx);
             if (idx != -1) {  //There is a match so check for status
                 //printf("idx = %d\n", idx);
                 foundMatch = 1;
-                if (shmemTable[b][i].status > 0 && shmemTable[b][i].status != ((1<<SHMEM_CHUNK_SIZE) -1)) {
-                    approx_shmem[b][shmemTable[b][i].paddr<<2+ (vaddr & 3)] = weight[ty][tx]; //Append two least significant bits in the paddr
+                if (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].status > 0 && shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].status != ((1<<SHMEM_CHUNK_SIZE) -1)) {
+                    approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2)+ (vaddr & 3))] = weight[ty][tx]; //Append two least significant bits in the paddr
                     if (b == 0 && bx == 0 && by == 0) 
-                        printf("Status before = %d, b=%d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", shmemTable[b][i].status, b, tx, ty, bx, by, vaddr, chunk_vaddr);
-                    shmemTable[b][i].status = shmemTable[b][i].status | (1 << (vaddr&3));
+                        printf("Status before = %d, b=%d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].status, b, tx, ty, bx, by, vaddr, chunk_vaddr);
+                    shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].status = shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].status | (1 << (vaddr&3));
                     if (b == 0 && bx == 0 && by == 0) 
-                        printf("Status after = %d, b=%d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", shmemTable[b][i].status, b, tx, ty, bx, by, vaddr, chunk_vaddr);
-                    if (shmemTable[b][i].status == (1<<SHMEM_CHUNK_SIZE) -1) {
+                        printf("Status after = %d, b=%d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].status, b, tx, ty, bx, by, vaddr, chunk_vaddr);
+                    if (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].status == (1<<SHMEM_CHUNK_SIZE) -1) {
                        //printf("Status just became 4\n");
                        //calculate hash
-                       temp_hash = approx_shmem[b][shmemTable[b][i].paddr<<2 + 0] +
-                                   approx_shmem[b][shmemTable[b][i].paddr<<2 + 1] +
-                                   approx_shmem[b][shmemTable[b][i].paddr<<2 + 2] +
-                                   approx_shmem[b][shmemTable[b][i].paddr<<2 + 3];
-                       shmemTable[b][i].hash[0] = temp_hash;
+                       temp_hash = approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2) + 0)] +
+                                   approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2) + 1)] +
+                                   approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2) + 2)] +
+                                   approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2) + 3)];
+                       shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].hash[0] = temp_hash;
                     }
                 }
                 else {
-                    printf("Status already 4\n");
+                    if (b == 0 && bx == 0 && by == 0) 
+                        printf("Status not 4 b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", b, i, tx, ty, bx, by, vaddr, chunk_vaddr);
                     //re-calculate hash in temp variable
-                   temp_hash = approx_shmem[b][shmemTable[b][i].paddr<<2 + 0] +
-                               approx_shmem[b][shmemTable[b][i].paddr<<2 + 1] +
-                               approx_shmem[b][shmemTable[b][i].paddr<<2 + 2] +
-                               approx_shmem[b][shmemTable[b][i].paddr<<2 + 3];
-                    if (sizeQueue(&shmemTable[b][i].vaddrQueue) > 1) {//This means already compressed
-                        printf("Already compressed\n");
-                        if (shmemTable[b][i].hash[0] != temp_hash) { //this needs to be some sort of similarity check not an exact equal to
-                           printf("Hash Not Matched\n");
+                    temp_hash = approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2) + 0)] +
+                                approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2) + 1)] +
+                                approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2) + 2)] +
+                                approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2) + 3)];
+                    if (sizeQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue) > 1) {//This means already compressed
+                        if (b == 0 && bx == 0 && by == 0) 
+                            printf("Already compressed b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", b, i, tx, ty, bx, by, vaddr, chunk_vaddr);
+                        if (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].hash[0] != temp_hash) { //this needs to be some sort of similarity check not an exact equal to
+                            if (b == 0 && bx == 0 && by == 0) 
+                                printf("Hash Not Matched b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", b, i, tx, ty, bx, by, vaddr, chunk_vaddr);
                            hash_diverged = 1; 
                            diverge_index = i;
                         }
                         else {
-                            printf("Hash Matched\n");
+                            if (b == 0 && bx == 0 && by == 0) 
+                                printf("Hash Matched b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", b, i, tx, ty, bx, by, vaddr, chunk_vaddr);
                             //Do nothing and just write data
-                            approx_shmem[b][shmemTable[b][i].paddr <<2 + (vaddr & 3)] = weight[ty][tx]; //Append two least significant bits in the paddr
+                            approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2)+ (vaddr & 3))] = weight[ty][tx];
+                            //approx_shmem[b][shmemTable[by][i].paddr <<2 + (vaddr & 3)] = weight[ty][tx]; //Append two least significant bits in the paddr
                         }
                     }
                     else {
-                        printf("Not Already compressed\n");
-                        approx_shmem[b][shmemTable[b][i].paddr <<2 + (vaddr & 3)] = weight[ty][tx];  //Append two least significant bits in the paddr
+                        if (b == 0 && bx == 0 && by == 0) 
+                            printf("Not already complressed b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", b, i, tx, ty, bx, by, vaddr, chunk_vaddr);
+                        approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2)+ (vaddr & 3))] = weight[ty][tx];
+                        //approx_shmem[b][shmemTable[b][i].paddr <<2 + (vaddr & 3)] = weight[ty][tx];  //Append two least significant bits in the paddr
 
                         //Just write the temp hash into the table
-                        shmemTable[b][i].hash[0] = temp_hash;
+                        shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].hash[0] = temp_hash;
                     }
                 }
             }
@@ -289,49 +289,52 @@ __device__ void approxShmem(float weight[][WIDTH], float approx_shmem[][SHMEM_EL
     if (foundMatch == 0 || hash_diverged == 1) {
         //printf("Inside no match found\n");
         for (int i = 0; i< SHMEMSIZE/4/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE; i++){
-            if(shmemTable[b][i].valid == 0) {
-                clearQueue(&shmemTable[b][i].vaddrQueue);
-                pushQueue(&shmemTable[b][i].vaddrQueue, vaddr >> 2);
-                approx_shmem[b][shmemTable[b][i].paddr << 2 + (vaddr & 3)] = weight[ty][tx];  //Append two least significant bits in the paddr
-                shmemTable[b][i].status = (1 << (vaddr&3));
-                shmemTable[b][i].valid = 1;
+            if(shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].valid == 0) {
                 if (b == 0 && bx == 0 && by == 0) {
-                    printf("Allocating b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", b, i, tx, ty, bx, by, vaddr, chunk_vaddr);
+                    printf("Trying to allocate b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", b, i, tx, ty, bx, by, vaddr, chunk_vaddr);
+                }
+                clearQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue);
+                pushQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, vaddr >> 2);
+                approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2)+ (vaddr & 3))] = weight[ty][tx];
+                shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].status = (1 << (vaddr&3));
+                shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].valid = 1;
+                if (b == 0 && bx == 0 && by == 0) {
+                    printf("Allocated b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d, vaddr = %lx, chunk_vaddr = %lx\n", b, i, tx, ty, bx, by, vaddr, chunk_vaddr);
                 }
                 //printf("Allocating b = %d, i = %d, ty = %d, tx = %d, vaddr = %x, chunk_vaddr = %x\n", b, i, ty, tx, vaddr, chunk_vaddr);
                 //FIXME PLEASEEEEEEEEEEEEEEEEEEEEE Delete older vddr after hash divergece. Will use delFromIndex here
                 if (hash_diverged == 1) {
-                    printf("Inside hash diverged\n");
-                    approx_shmem[b][shmemTable[b][i].paddr<<2 + 0] =  approx_shmem[b][shmemTable[b][diverge_index].paddr<<2 + 0];  // Append two least significant bits in the paddr<<2 + 
-                    approx_shmem[b][shmemTable[b][i].paddr<<2 + 1] =  approx_shmem[b][shmemTable[b][diverge_index].paddr<<2 + 1];  // Append two least significant bits in the paddr<<2 + 
-                    approx_shmem[b][shmemTable[b][i].paddr<<2 + 2] =  approx_shmem[b][shmemTable[b][diverge_index].paddr<<2 + 2];  // Append two least significant bits in the paddr<<2 + 
-                    approx_shmem[b][shmemTable[b][i].paddr<<2 + 3] =  approx_shmem[b][shmemTable[b][diverge_index].paddr<<2 + 3];  // Append two least significant bits in the paddr<<2 + 
-                    approx_shmem[b][shmemTable[b][i].paddr<<2 + (vaddr & 3)] =  weight[ty][tx];  // Append two least significant bits in the paddr
-                    shmemTable[b][i].hash[0] = temp_hash;
+                    if (b == 0 && bx == 0 && by == 0) 
+                        printf("Inside hash diverged\n");
+                    approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2)+ 0)] = approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].paddr<<2)+ 0)];
+                    approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2)+ 1)] = approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].paddr<<2)+ 1)];
+                    approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2)+ 2)] = approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].paddr<<2)+ 2)];
+                    approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr<<2)+ 3)] = approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].paddr<<2)+ 3)]; 
+                    shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].hash[0] = temp_hash;
                 }
                 break;
             }
         }
     }
     //printf("Before conservative check of hashes\n");
-    /*if( hash_diverged == 0) {
+    if( hash_diverged == 0) {
         for (int i = 0; i< SHMEMSIZE/4/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE; i++){
-            if (shmemTable[b][i].valid == 0)
+            if (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].valid == 0)
                 continue;
             for (int j = i+1; j< SHMEMSIZE/4/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE; j++){
-                if (shmemTable[b][j].valid == 0)
+                if (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+j].valid == 0)
                     continue;
                 //FIXME check if status is full as well before comparing hashes
-                if (shmemTable[b][i].hash[0] == shmemTable[b][j].hash[0]) {
+                if (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].hash[0] == shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+j].hash[0]) {
                     printf("Hash matched in the conservative check so some magic will happen\n");
-                    for (int k = 0; k < sizeQueue(&shmemTable[b][j].vaddrQueue); k++)
-                        pushQueue(&shmemTable[b][i].vaddrQueue, getValueQueue(&shmemTable[b][j].vaddrQueue, k));
+                    for (int k = 0; k < sizeQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+j].vaddrQueue); k++)
+                        pushQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, getValueQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+j].vaddrQueue, k));
                         shmemTable[b][j].valid = 0;
-                        clearQueue(&shmemTable[b][i].vaddrQueue);
+                        clearQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue);
                 }
             }
         }
-    }*/
+    }
     if (b == 0 && bx == 0 && by == 0) 
         printf("End of function\n");
     
@@ -343,7 +346,9 @@ bpnn_layerforward_CUDA(float *input_cuda,
 					   float *input_hidden_cuda,
 					   float *hidden_partial_sum,
 					   int in,
-					   int hid) 
+					   int hid,
+                       float **approx_shmem,
+                       struct shmemTableEntry **shmemTable) 
 {
    int by = blockIdx.y;
    int bx = blockIdx.x;
@@ -358,19 +363,24 @@ bpnn_layerforward_CUDA(float *input_cuda,
    __shared__ float input_node[HEIGHT];
    __shared__ float weight_matrix[HEIGHT][WIDTH];
    float approx_weight_matrix[HEIGHT][WIDTH];
-   float approx_shmem[SHMEM_NUM_BANKS][SHMEMSIZE/4/SHMEM_NUM_BANKS]; //32 banks and 384 elements per bank
-   struct shmemTableEntry shmemTable[SHMEM_NUM_BANKS][SHMEMSIZE/4/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE]; //for all 32 banks, entries per chunk
-   int APPROX = 1;
+   //float approx_shmem[SHMEM_NUM_BANKS][SHMEMSIZE/4/SHMEM_NUM_BANKS]; //32 banks and 384 elements per bank
+   //struct shmemTableEntry shmemTable[SHMEM_NUM_BANKS][SHMEMSIZE/4/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE]; //for all 32 banks, entries per chunk
+   int APPROX = 0;
 
-    //FIXME do a shmem table init
+    //FIXME do a shmem table init now by using all threads
     //Set paddr based on the loop index - a constant paddr per entry for simple allocation
     //Set all valid to 0, 
-    for (int b = 0; b < SHMEM_NUM_BANKS; b++) {
-        for (int i = 0; i <  SHMEMSIZE/4/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE; i++) {
-            shmemTable[b][i].paddr = i;
-            shmemTable[b][i].vaddrQueue = NULL;
+    //FIXME Confirm if this is correct
+
+    if(ty < 2){
+       for(int i = 0; i < SHMEM_TABLE_NUM_ENTRIES; i++) {
+           shmemTable[by][(ty*16+tx)*SHMEM_TABLE_NUM_ENTRIES + i].paddr = i;
+           shmemTable[by][(ty*16+tx)*SHMEM_TABLE_NUM_ENTRIES + i].vaddrQueue = NULL;
         }
-   }
+    }
+
+    __syncthreads();
+
    if ( tx == 0 )
        input_node[ty] = input_cuda[index_in];
 
@@ -397,14 +407,14 @@ bpnn_layerforward_CUDA(float *input_cuda,
    __syncthreads();
 
    if (APPROX) {
-       approx_weight_matrix[ty][tx] = getApproxShmem(&weight_matrix[ty][tx], approx_shmem, shmemTable);
+       approx_weight_matrix[ty][tx] = getApproxShmem(&weight_matrix[ty][tx], approx_shmem, shmemTable, by);
        approx_weight_matrix[ty][tx] = approx_weight_matrix[ty][tx] * input_node[ty];
        approxShmem(approx_weight_matrix, approx_shmem, shmemTable, bx, by, tx, ty, &weight_matrix[ty][tx]); 
        weight_matrix[ty][tx] = approx_weight_matrix[ty][tx];
    }
    else {
-       approx_weight_matrix[ty][tx] = getApproxShmem(&weight_matrix[ty][tx], approx_shmem, shmemTable) * input_node[ty];
-       approxShmem(approx_weight_matrix, approx_shmem, shmemTable, bx, by, tx, ty, &weight_matrix[ty][tx]); 
+       //approx_weight_matrix[ty][tx] = getApproxShmem(&weight_matrix[ty][tx], approx_shmem, shmemTable, by) * input_node[ty];
+       //approxShmem(approx_weight_matrix, approx_shmem, shmemTable, bx, by, tx, ty, &weight_matrix[ty][tx]); 
        weight_matrix[ty][tx] = weight_matrix[ty][tx] * input_node[ty];
    }
    //printf("READWRITE bx,by,tx,ty,smID=%d,%d,%d,%d,%d weight_matrx=%f\n", bx, by, tx, ty, smID, weight_matrix[ty][tx]);
@@ -417,13 +427,13 @@ bpnn_layerforward_CUDA(float *input_cuda,
 
 	   if( ty % power_two == 0 ) {
            if (APPROX) {
-               approx_weight_matrix[ty][tx] = getApproxShmem(&weight_matrix[ty][tx], approx_shmem, shmemTable) + getApproxShmem(&weight_matrix[ty + power_two/2][tx], approx_shmem, shmemTable);
+               approx_weight_matrix[ty][tx] = getApproxShmem(&weight_matrix[ty][tx], approx_shmem, shmemTable, by) + getApproxShmem(&weight_matrix[ty + power_two/2][tx], approx_shmem, shmemTable, by);
                approxShmem(approx_weight_matrix, approx_shmem, shmemTable, bx, by, tx, ty, &weight_matrix[ty][tx]); 
                weight_matrix[ty][tx] = approx_weight_matrix[ty][tx];
             }
             else {
-               approx_weight_matrix[ty][tx] = weight_matrix[ty][tx] + weight_matrix[ty + power_two/2][tx];
-               approxShmem(approx_weight_matrix, approx_shmem, shmemTable, bx, by, tx, ty, &weight_matrix[ty][tx]); 
+               //approx_weight_matrix[ty][tx] = weight_matrix[ty][tx] + weight_matrix[ty + power_two/2][tx];
+               //approxShmem(approx_weight_matrix, approx_shmem, shmemTable, bx, by, tx, ty, &weight_matrix[ty][tx]); 
                weight_matrix[ty][tx] = weight_matrix[ty][tx] + weight_matrix[ty + power_two/2][tx];
             }
         }
@@ -434,7 +444,7 @@ bpnn_layerforward_CUDA(float *input_cuda,
    //__syncthreads();
 
    if (APPROX) {
-       input_hidden_cuda[index] = getApproxShmem(&weight_matrix[ty][tx], approx_shmem, shmemTable);
+       input_hidden_cuda[index] = getApproxShmem(&weight_matrix[ty][tx], approx_shmem, shmemTable, by);
    }
    else {
        input_hidden_cuda[index] = weight_matrix[ty][tx];
@@ -456,7 +466,7 @@ bpnn_layerforward_CUDA(float *input_cuda,
 
    if ( tx == 0 ) {
            if (APPROX) {
-               hidden_partial_sum[by * hid + ty] = getApproxShmem(&weight_matrix[tx][ty], approx_shmem, shmemTable);
+               hidden_partial_sum[by * hid + ty] = getApproxShmem(&weight_matrix[tx][ty], approx_shmem, shmemTable, by);
             }
             else {
                hidden_partial_sum[by * hid + ty] = weight_matrix[tx][ty];
