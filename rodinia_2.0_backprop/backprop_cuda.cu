@@ -103,7 +103,7 @@ void bpnn_train_cuda(BPNN *net, float *eo, float *eh)
   //FIXME figure out a way to allocate all pointers in the cuda memory itself. Looks like this way, GPU array is pointing towards host addresses.
   float **h_approx_shmem = (float**)malloc(num_blocks*sizeof(float*));
   struct shmemTableEntry **h_shmemTable = (struct shmemTableEntry**)malloc(num_blocks*sizeof(struct shmemTableEntry*));
-  printf("Malloc 1\n");
+  printf("Malloc 1, SHMEM_ELEMENTS_PER_BANK = %d, SHMEM_TABLE_NUM_ENTRIES = %d\n", SHMEM_ELEMENTS_PER_BANK, SHMEM_TABLE_NUM_ENTRIES);
   for (int blks = 0; blks < num_blocks; blks++) {
       cudaMalloc((void**)&h_approx_shmem[blks], (SHMEM_NUM_BANKS*SHMEM_ELEMENTS_PER_BANK) * sizeof(float));
       cudaMalloc((void**)&h_shmemTable[blks], (SHMEM_NUM_BANKS*SHMEM_TABLE_NUM_ENTRIES) * sizeof(struct shmemTableEntry));
