@@ -26,7 +26,7 @@ struct shmemTableEntry {
     int paddr;
     float hash[3]; //0 = min, 1 = max, 2 = avg
     int status; //0000 = empty, 0001 = only first, 0010 = only second, 0100 = only third, 1000 only 4th, 1111 = all
-} ;
+};
 
 typedef struct {
   int input_n;                  /* number of input units */

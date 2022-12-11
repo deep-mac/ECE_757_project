@@ -112,12 +112,12 @@ __device__ void clearQueue(struct queueNode **q)
 __device__ void printQueue(struct queueNode *q, int i, int tx, int ty)
 {
     struct queueNode *ptr = q;
-    printf("Printing queue i = %d, tx = %d, ty = %d", i, tx, ty);
+    //printf("Printing queue i = %d, tx = %d, ty = %d", i, tx, ty);
     while(ptr!=NULL) {
-        printf("%lx\t", ptr->vaddr);
+        printf("%lx,", ptr->vaddr);
         ptr = ptr->next;
     }
-    printf("\n");
+    //printf("\n");
 }
 
 __device__ void printShmemTable(struct shmemTableEntry **shmemTable , int bank, int by, int tx, int ty)
@@ -125,7 +125,9 @@ __device__ void printShmemTable(struct shmemTableEntry **shmemTable , int bank, 
     for (int b = 0; b < SHMEM_NUM_BANKS; b++) {
         bank = b;
         for (int i= 0; i<256/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE; i++){
-            printf("shmemTable by = %d, tx = %d, ty = %d, bank = %d, valid = %d, vaddrSize = %d, paddr = %d, hash[0] = %f, status = %d\n", by, tx, ty, bank, shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].valid, sizeQueue(&shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue), shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].paddr, shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].hash[0], shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].status);
+            printf("shmemTable by = %d, tx = %d, ty = %d, bank = %d, valid = %d, vaddr = ",by, tx, ty, bank, shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].valid);
+            printQueue(shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, 0, tx, ty);
+            printf(" paddr = %d, hash[0] = %f, status = %d\n", shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].paddr, shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].hash[0], shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].status);
         }
     }
 }
@@ -140,6 +142,22 @@ __device__ int getValueQueue(struct queueNode **q, int index)
         ptr = ptr->next;
     }
     return (ptr->vaddr);
+}
+
+__device__ int getMinValueIndexQueue(struct queueNode **q)
+{
+    struct queueNode *ptr = *q;
+    if (ptr == NULL)
+        return -1;
+    int min = getValueQueue(q, 0);
+    int minIdx = 0;
+    for(int i=0 ; ptr != NULL; ptr=ptr->next, i++)
+        if(ptr->vaddr < min)    
+        {
+            min = ptr->vaddr;
+            minIdx = i;
+        }
+    return minIdx;
 }
 
 
@@ -281,6 +299,7 @@ __device__ void approxShmem(float weight[][WIDTH], float **approx_shmem, struct 
                             int allocated = 0;
                             hash_diverged = 1;
                             diverge_index = i;
+                            
                             /*while (allocated == 0 && new_entry < 256/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE){
                                 if (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+new_entry].valid == 0) {
                                     shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+new_entry].valid = 1;
@@ -310,7 +329,65 @@ __device__ void approxShmem(float weight[][WIDTH], float **approx_shmem, struct 
         }
         if (b == 6 && bx == 0 && by == 0) 
             printf("FoundMatch = %d, hash_diverged = %d\n", foundMatch, hash_diverged);
-        if (foundMatch == 0 || hash_diverged == 1) {
+        if(hash_diverged == 1)
+        {
+            int minIdx = getMinValueIndexQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue);
+            int idx;
+            if (b == 6 && bx == 0 && by == 0) 
+                idx = findInQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk, 1, tx, ty, 0);
+            else
+                idx = findInQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk, 0, tx, ty, 0);
+            
+            
+            if (idx == -1) {
+                if (b == 6 && bx == 0 && by == 0) 
+                    printf("Something is wrong since idx cannot be -1 here, bank = %d, tx = %d, ty = %d, i = %d, chunk = %d\n", b, tx, ty, 0, chunk);
+            }
+            else
+            {
+                if(minIdx == idx)
+                {
+                    //case 1: minIdx == idx: shift other elements to new min; 
+                    int size = sizeQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue);
+
+                    //get values in the addr queue of the chunk that diverged
+                    struct queueNode *tempQueue = NULL;
+                    for(int j=0; j<size; j++)
+                        if(j != minIdx)
+                            pushQueue(&tempQueue, getValueQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, j));
+
+                    // find new min value in the queue (essentially, the second min value in the original queue) 
+                    int newMinIdx = getMinValueIndexQueue(&tempQueue);
+                    int shmemEntryIndex = getValueQueue(&tempQueue, newMinIdx);
+                    // clear the queue at the existing index and reassign to temp queue
+                    clearQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+shmemEntryIndex].vaddrQueue);
+                    shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+shmemEntryIndex].vaddrQueue = tempQueue;
+                    //update hash
+                    shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+shmemEntryIndex].hash[0] = shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].hash[0];
+                    shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+shmemEntryIndex].valid = 1;
+                    shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+shmemEntryIndex].status = 15;
+                    
+
+                    // update the queue of the chunk that diverged: clear existing queue and push chunk addr to queue
+                    clearQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue);
+                    pushQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk);
+                    shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].hash[0] = temp_hash;
+                }
+                else
+                {
+                    //case 2: minIdx != idx: move idx to original location (chunk) & remove idx from vaddrQueue
+                    clearQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+chunk].vaddrQueue);
+                    pushQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+chunk].vaddrQueue, chunk);
+                    delFromQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk);
+
+                    shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+chunk].valid = 1;
+                    shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+chunk].status = 15;
+                    shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+chunk].hash[0] = temp_hash;
+                }
+            }
+        }
+        
+        if (foundMatch == 0) {
             int i = 0;
             int allocated = 0;
             while (allocated == 0 && i < 256/SHMEM_NUM_BANKS/SHMEM_CHUNK_SIZE){
@@ -324,20 +401,6 @@ __device__ void approxShmem(float weight[][WIDTH], float **approx_shmem, struct 
                     clearQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue);
                     pushQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, chunk);
                     shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].status = 15;
-                    if (hash_diverged == 1) {
-                        int idx;
-                        if (b == 6 && bx == 0 && by == 0) 
-                            idx = findInQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk, 1, tx, ty, i);
-                        else
-                            idx = findInQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk, 0, tx, ty, i);
-                        if (idx == -1) {
-                            if (b == 6 && bx == 0 && by == 0) 
-                                printf("Something is wrong since idx cannot be -1 here, bank = %d, tx = %d, ty = %d, i = %d, chunk = %d\n", b, tx, ty, i, chunk);
-                        }
-                        else{
-                            delFromQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, idx);
-                        }
-                    }
                     allocated = 1;
                     if (b == 6 && bx == 0 && by == 0) 
                         printf("Allocated b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d, chunk = %d\n", b, i, tx, ty, bx, by, chunk);
