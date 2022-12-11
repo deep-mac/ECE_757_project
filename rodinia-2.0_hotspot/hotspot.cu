@@ -144,7 +144,7 @@ __device__ void printQueue(struct queueNode *q, int i, int tx, int ty)
     //printf("\n");
 }
 
-__device__ void printShmemTable(struct shmemTableEntry **shmemTable , int bank, int by, int tx, int ty)
+__device__ void printShmemTable(struct shmemTableEntry **shmemTable , int bank, int by, int tx, int ty, float **approx_shmem)
 {
     for (int b = 0; b < SHMEM_NUM_BANKS; b++) {
         bank = b;
@@ -153,6 +153,15 @@ __device__ void printShmemTable(struct shmemTableEntry **shmemTable , int bank, 
             printQueue(shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, 0, tx, ty);
             printf(" paddr = %d, hash[0] = %f, status = %d\n", shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].paddr, shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].hash[0], shmemTable[by][bank*SHMEM_TABLE_NUM_ENTRIES+i].status);
         }
+    }
+
+    printf("----------------------------------SHMEM--------------------------------------\n");
+    for(int b = 0; b < SHMEM_NUM_BANKS; b++){
+        printf("Shem[%d][%d] = ", by, b);
+        for (int i = 0; i<APP_SHMEM_ELEMENTS_PER_BANK; i++){
+            printf("%f, ", approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+i]);
+        }
+        printf("\n");
     }
 }
 
@@ -204,13 +213,15 @@ __device__ float getApproxShmem(int input_vaddr, int b, float **approx_shmem, st
                 //there is match
                 //printf("In getApproxShmem, Found entry in queue\n");
                 value = approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+ ((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].paddr << 2) + (input_vaddr & 3))];
+                if (b == 7)
+                    printf("Returning for read, chunk = %d, b = %d, tx = %d, ty = %d, input_vaddr = %d, blk = %d, value = %f\n", chunk, b, tx, ty, input_vaddr, by, value);
                 match = 1;
                 break;
             }
         }
     }
     if (match == 0) {
-        //if (b == 0 && by == 53)
+        //if (b == 7 && by == 0)
         printf("There is no match in the vaddrQueue for reads, chunk = %d, b = %d, tx = %d, ty = %d, input_vaddr = %d, blk = %d\n", chunk, b, tx, ty, input_vaddr, by);
     }
     //printf("get approxShmem, value = %f\n", value);
@@ -232,7 +243,7 @@ __device__ void approxShmem(float weight[][BLOCK_SIZE], float **approx_shmem, st
     temp_hash = 0;
     b = bank;
     chunk_vaddr = vaddr >> 2;
-    if (b == 0 && by == 53)  {
+    if (b == 7 && by == 0)  {
         printf("Start of function\n");
     }
     //if write
@@ -298,7 +309,7 @@ __device__ void approxShmem(float weight[][BLOCK_SIZE], float **approx_shmem, st
     //FIXME - there is a problem with reads. If the hash diverges,  the 0th entry with vaddr zero can move to 1st entry with vaddr 0. It points to paddr 1. However in actual shmem, the entry is still at location 0. Unless there is second copy of the shared memory which reflects data exactly as it is in the shmem_Table, there will be an issue in reading approximate data. 
     //FIXME - the hash looks like is being calculated incorrectly. In the third iteration of writes, all the hashes for which there is compression are exactly same. Need to check. Could be related to the problem above
     for (int chunk = 0; chunk < APP_SHMEM_TABLE_ENTRIES_PER_BANK; chunk++){
-        if (b == 0 && by == 53) 
+        if (b == 7 && by == 0) 
             printf("Starting new iteration b = %d, chunk = %d, tx = %d, ty = %d, bx = %d, by = %d\n", b, chunk, tx, ty, bx, by);
         foundMatch = 0;
         hash_diverged = 0;
@@ -306,12 +317,12 @@ __device__ void approxShmem(float weight[][BLOCK_SIZE], float **approx_shmem, st
         for (int i = 0; i< APP_SHMEM_TABLE_ENTRIES_PER_BANK; i++){
             if(shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].valid == 1){ //Check whether there is anything valid and partial
                 int idx;
-                if (b == 0 && by == 53) 
+                if (b == 7 && by == 0) 
                     printf("Trying to find match b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d\n", b, i, tx, ty, bx, by);
                 idx = findInQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, chunk, 0, tx, ty, i);
                 if (idx != -1) { 
                     foundMatch = 1;
-                    if (b == 0 && by == 53) 
+                    if (b == 7 && by == 0) 
                         printf("Found match b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d\n", b, i, tx, ty, bx, by);
                     temp_hash = approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+(chunk*4+0)] +
                                 approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+(chunk*4+1)] +
@@ -357,20 +368,20 @@ __device__ void approxShmem(float weight[][BLOCK_SIZE], float **approx_shmem, st
                 }
             }
         }
-        if (b == 0 && by == 53) 
+        if (b == 7 && by == 0) 
             printf("FoundMatch = %d, hash_diverged = %d\n", foundMatch, hash_diverged);
         if(hash_diverged == 1)
         {
             int minIdx = getMinValueIndexQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue);
             int idx;
-            if (b == 0 && by == 53) 
+            if (b == 7 && by == 0) 
                 idx = findInQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk, 1, tx, ty, 0);
             else
                 idx = findInQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk, 0, tx, ty, 0);
             
             
             if (idx == -1) {
-                if (b == 0 && by == 53) 
+                if (b == 7 && by == 0) 
                     printf("Something is wrong since idx cannot be -1 here, bank = %d, tx = %d, ty = %d, i = %d, chunk = %d\n", b, tx, ty, 0, chunk);
             }
             else
@@ -421,7 +432,7 @@ __device__ void approxShmem(float weight[][BLOCK_SIZE], float **approx_shmem, st
             int i = 0;
             int allocated = 0;
             while (allocated == 0 && i < APP_SHMEM_TABLE_ENTRIES_PER_BANK){
-                if (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].valid == 0) {
+                if (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].valid == 0 && i == chunk) {
                     shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].valid = 1;
                     temp_hash = approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+(chunk*4+0)] +
                                 approx_shmem[by][b*SHMEM_ELEMENTS_PER_BANK+(chunk*4+1)] +
@@ -432,7 +443,7 @@ __device__ void approxShmem(float weight[][BLOCK_SIZE], float **approx_shmem, st
                     pushQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, chunk);
                     shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].status = 15;
                     allocated = 1;
-                    if (b == 0 && by == 53) 
+                    if (b == 7 && by == 0) 
                         printf("Allocated b = %d, i = %d, tx = %d, ty = %d, bx = %d, by = %d, chunk = %d\n", b, i, tx, ty, bx, by, chunk);
                 }
                 i++;
@@ -449,7 +460,7 @@ __device__ void approxShmem(float weight[][BLOCK_SIZE], float **approx_shmem, st
                     continue;
                 //FIXME check if status is full as well before comparing hashes
                 if ((shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].hash[0] - shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+j].hash[0]) <= HASH_ERROR && (shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].hash[0] - shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+j].hash[0]) >= (-1*HASH_ERROR)){  
-                    if (b == 0 && by == 53) 
+                    if (b == 7 && by == 0) 
                         printf("Hash matched in the conservative check so some magic will happen\n");
                     for (int k = 0; k < sizeQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+j].vaddrQueue); k++)
                         pushQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, getValueQueue(&shmemTable[by][b*SHMEM_TABLE_NUM_ENTRIES+j].vaddrQueue, k));
@@ -459,7 +470,7 @@ __device__ void approxShmem(float weight[][BLOCK_SIZE], float **approx_shmem, st
             }
         }
     }
-    if (b == 0 && by == 53)  {
+    if (b == 7 && by == 0)  {
         printf("End of function\n");
     }
     
@@ -546,7 +557,7 @@ __global__ void calculate_temp(int iteration,  //number of iteration
     __shared__ float power_on_cuda[BLOCK_SIZE][BLOCK_SIZE];
     __shared__ float temp_t[BLOCK_SIZE][BLOCK_SIZE]; // saving temparary temperature result
 
-    int APPROX = 1;
+    int APPROX = 0;
 
 	float amb_temp = 80.0;
     float step_div_Cap;
@@ -621,9 +632,9 @@ __global__ void calculate_temp(int iteration,  //number of iteration
     }
 
     __syncthreads();
-    if (bank == 0 && blk == 53 && tx == 0 && ty == 0) {
+    if (bank == 0 && blk == 0 && tx == 0 && ty == 0) {
         printf("temp_on_cuda[%d][%d] = %f\n", ty, tx, temp_on_cuda[ty][tx]);
-        printShmemTable(shmemTable, bank, blk, tx, ty);
+        printShmemTable(shmemTable, bank, blk, tx, ty, approx_shmem);
     }
 
     __syncthreads();
@@ -646,6 +657,10 @@ __global__ void calculate_temp(int iteration,  //number of iteration
     W = (W < validXmin) ? validXmin : W;
     E = (E > validXmax) ? validXmax : E;
 
+    if ((ty == 8 || ty == 6) && tx == 7){
+        printf("N=%d, S=%d, W=%d, E=%d\n", N, S, W, E);
+    }
+
     bool computed;
     if (APPROX) {
         for (int i=0; i<iteration ; i++){ 
@@ -655,7 +670,16 @@ __global__ void calculate_temp(int iteration,  //number of iteration
                   IN_RANGE(tx, validXmin, validXmax) && \
                   IN_RANGE(ty, validYmin, validYmax) ) {
                   computed = true;
-                  temp_t[ty][tx] =   getApproxShmem(offset_temp_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty) + step_div_Cap * (getApproxShmem(offset_power_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty) + (getApproxShmem(int(S/2), (S*16+tx)%32, approx_shmem, shmemTable, blk, tx, ty) + getApproxShmem((int)N/2, (N*16+tx)%32, approx_shmem, shmemTable, blk, tx, ty) - 2.0*getApproxShmem(offset_temp_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty)) * Ry_1 + (getApproxShmem(offset_temp_on_cuda, (ty*16+E)%32, approx_shmem, shmemTable, blk, tx, ty) + getApproxShmem(offset_temp_on_cuda, (ty*16+W)%32, approx_shmem, shmemTable, blk, tx, ty) - 2.0*getApproxShmem(offset_temp_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty)) * Rx_1 + (amb_temp - getApproxShmem(offset_temp_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty)) * Rz_1);
+                  float temp_1 = getApproxShmem(int(S/2), (S*16+tx)%32, approx_shmem, shmemTable, blk, tx, ty) + getApproxShmem((int)N/2, (N*16+tx)%32, approx_shmem, shmemTable, blk, tx, ty) - 2.0*getApproxShmem(offset_temp_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty);
+                  float temp_1_1 = getApproxShmem(int(S/2), (S*16+tx)%32, approx_shmem, shmemTable, blk, tx, ty);
+                  float temp_1_2 = getApproxShmem((int)N/2, (N*16+tx)%32, approx_shmem, shmemTable, blk, tx, ty);
+                  float temp_1_3 = getApproxShmem(offset_temp_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty);
+                  float temp_2 = (getApproxShmem(offset_temp_on_cuda, (ty*16+E)%32, approx_shmem, shmemTable, blk, tx, ty) + getApproxShmem(offset_temp_on_cuda, (ty*16+W)%32, approx_shmem, shmemTable, blk, tx, ty) - 2.0*getApproxShmem(offset_temp_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty));
+                  float temp_3 = (amb_temp - getApproxShmem(offset_temp_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty));
+                  temp_t[ty][tx] =   getApproxShmem(offset_temp_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty) + step_div_Cap * (getApproxShmem(offset_power_on_cuda, bank, approx_shmem, shmemTable, blk, tx, ty) + (temp_1)* Ry_1 + (temp_2)  * Rx_1 +  (temp_3)* Rz_1);
+                  if ((ty == 8 || ty == 6) && tx == 7){
+                    printf("temp_t[%d][%d] = %f, temp_1 =%f, temp_1_1 = %f, temp_1_2 = %f, temp_1_3 = %f, temp_2 = %f, temp_3 = %f\n", ty, tx, temp_t[ty][tx], temp_1, temp_1_1, temp_1_2, temp_1_3,temp_2, temp_3);
+                  }
                  approx_shmem[blk][bank*SHMEM_ELEMENTS_PER_BANK+offset_temp_t] = temp_t[ty][tx];
         
             }
@@ -665,6 +689,14 @@ __global__ void calculate_temp(int iteration,  //number of iteration
                 approxShmem(temp_on_cuda, approx_shmem, shmemTable, bx, blk, tx, ty, bank, &temp_on_cuda[ty][tx]); 
             }
             __syncthreads();
+
+            if (bank == 0 && blk == 0 && tx == 0 && ty == 0) {
+                printf("temp_on_cuda[%d][%d] = %f\n", ty, tx, temp_on_cuda[ty][tx]);
+                printShmemTable(shmemTable, bank, blk, tx, ty, approx_shmem);
+            }
+            
+            __syncthreads();
+
 
             if(i==iteration-1)
                 break;
@@ -678,6 +710,11 @@ __global__ void calculate_temp(int iteration,  //number of iteration
                 approxShmem(temp_on_cuda, approx_shmem, shmemTable, bx, blk, tx, ty, bank, &temp_on_cuda[ty][tx]); 
             }
             __syncthreads();
+
+            if (bank == 0 && blk == 0 && tx == 0 && ty == 0) {
+                printf("temp_on_cuda[%d][%d] = %f\n", ty, tx, temp_on_cuda[ty][tx]);
+                printShmemTable(shmemTable, bank, blk, tx, ty, approx_shmem);
+            }
           }
 
           // update the global memory
@@ -695,10 +732,19 @@ __global__ void calculate_temp(int iteration,  //number of iteration
                   IN_RANGE(tx, validXmin, validXmax) && \
                   IN_RANGE(ty, validYmin, validYmax) ) {
                   computed = true;
+                  float temp_1 = temp_on_cuda[S][tx] + temp_on_cuda[N][tx] - 2.0*temp_on_cuda[ty][tx];
+                  float temp_1_1 = temp_on_cuda[S][tx];
+                  float temp_1_2 = temp_on_cuda[N][tx];
+                  float temp_1_3 = temp_on_cuda[ty][tx];
+                  float temp_2 = temp_on_cuda[ty][E] + temp_on_cuda[ty][W] - 2.0*temp_on_cuda[ty][tx];
+                  float temp_3 = amb_temp - temp_on_cuda[ty][tx];
                   temp_t[ty][tx] =   temp_on_cuda[ty][tx] + step_div_Cap * (power_on_cuda[ty][tx] + 
-                     (temp_on_cuda[S][tx] + temp_on_cuda[N][tx] - 2.0*temp_on_cuda[ty][tx]) * Ry_1 + 
-                     (temp_on_cuda[ty][E] + temp_on_cuda[ty][W] - 2.0*temp_on_cuda[ty][tx]) * Rx_1 + 
-                     (amb_temp - temp_on_cuda[ty][tx]) * Rz_1);
+                     (temp_1) * Ry_1 + 
+                     (temp_2) * Rx_1 + 
+                     (temp_3) * Rz_1);
+                  if ((ty == 8 || ty == 6) && tx == 7){
+                    printf("temp_t[%d][%d] = %f, temp_1 =%f, temp_1_1 = %f, temp_1_2 = %f, temp_1_3 = %f, temp_2 = %f, temp_3 = %f\n", ty, tx, temp_t[ty][tx], temp_1, temp_1_1, temp_1_2, temp_1_3,temp_2, temp_3);
+                  }
         
             }
             __syncthreads();
