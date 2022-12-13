@@ -80,21 +80,48 @@ __device__ int get_offset(int ty, int tx, int n){
         return 0;
 }
 
-__device__ float get_hash(float **approx_shmem, int blk, int bank, int chunk)
+/*__device__ float get_hash(float **approx_shmem, int blk, int bank, int chunk)
 {
     float hash = 0;
     for (int i = 0; i < SHMEM_CHUNK_SIZE; i++){
         hash+=approx_shmem[blk][bank*SHMEM_ELEMENTS_PER_BANK+(chunk*SHMEM_CHUNK_SIZE+i)];
     }
     return hash;
+}*/
+
+__device__ int get_fp8(float num){
+    
+    int fp8 = 0;
+    int *numptr =(int*)&num;
+    int inum = *numptr;
+    //int bit_array[8] = {32, 31, 26, 25, 24, 23, 22, 21};
+    int bit_array[8] = {20, 21, 22, 23, 24, 25, 30, 31};
+    for (int i = 0; i < 8; i++){
+       int bit = inum & (1 << bit_array[i]);
+       if (bit){
+           fp8 = fp8 | (1 << (i)); 
+       }
+    }
+    //printf("num = %f, inum = %x fp8 = %x\n", num, inum, fp8);
+    return fp8;
 }
 
-/*__device__ float get_hash(float **approx_shmem, int blk, int bank, int chunk)
+__device__ float get_hash(float **approx_shmem, int blk, int bank, int chunk)
 {
-    float hash = 0;
-    hash = approx_shmem[blk][bank*SHMEM_ELEMENTS_PER_BANK+(chunk*SHMEM_CHUNK_SIZE+i)];
-    return hash;
-}*/
+    int hash[SHMEM_CHUNK_SIZE];
+    int hash_concat = 0;
+    float *hashptr;
+    for (int i = 0; i < SHMEM_CHUNK_SIZE; i++){
+        hash[i] = get_fp8(approx_shmem[blk][bank*SHMEM_ELEMENTS_PER_BANK+(chunk*SHMEM_CHUNK_SIZE+i)]);
+        //printf("i = %d, val = %f, hash_i = %d\n", i, approx_shmem[blk][bank*SHMEM_ELEMENTS_PER_BANK+(chunk*SHMEM_CHUNK_SIZE+i)],hash[i]);
+    }
+    for (int i = 0; i < SHMEM_CHUNK_SIZE; i++){
+        hash_concat = hash_concat | hash[i] << (i*8);
+    }
+    hashptr = (float*)&hash_concat;
+    //printf("hash_concat = %d, hash_float = %f\n", hash_concat, *hashptr);
+    return *hashptr;
+}
 
 __device__ void pushQueue(struct queueNode **q, long unsigned int vaddr){
     struct queueNode *newNode = (struct queueNode*)malloc(sizeof(struct queueNode));
@@ -279,7 +306,7 @@ __device__ float getApproxShmem(int input_vaddr, int b, float **approx_shmem, st
     return value;
 }
 
-__device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmemTable, int blk, int tx, int ty, int bank, int print){
+__device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmemTable, int blk, int tx, int ty, int bank, int print, int totalCompress[], int totalDiverge[], int currentCompress[]){
    
     int b; //b = bank
     int hash_diverged = 0;
@@ -357,6 +384,8 @@ __device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmem
                             if (b == 20 && blk == 0 && print)  {
                                 printf("Hash diverged, b = %d, i = %d, tx = %d, ty = %d, blk = %d, temp_hash = %f\n", b, i, tx, ty, blk, temp_hash);
                             }
+                            currentCompress[0]--;
+                            totalDiverge[0]++;
                         }
                     }
                     else {
@@ -484,6 +513,8 @@ __device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmem
                     for (int k = 0; k < sizeQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+j].vaddrQueue); k++)
                         pushQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, getValueQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+j].vaddrQueue, k));
                     shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+j].valid = 0;
+                    totalCompress[0]++;
+                    currentCompress[0]++;
                     clearQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+j].vaddrQueue);
                     if (blk == 0 && b == 20 && print)  {
                         printf("i =%d, hash= %f, VaddrQueue=", i, shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+i].hash[0]);
@@ -500,7 +531,6 @@ __device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmem
     if (b == 20 && blk == 0 && print)  {
         printf("End of function\n");
     }
-    
 }
 
 void 
@@ -585,7 +615,7 @@ __global__ void calculate_temp(int iteration,  //number of iteration
     __shared__ float power_on_cuda[BLOCK_SIZE][BLOCK_SIZE];
     __shared__ float temp_t[BLOCK_SIZE][BLOCK_SIZE]; // saving temparary temperature result
 
-    int APPROX = 0;
+    int APPROX = 1;
     int print = 0;
 
 	float amb_temp = 80.0;
@@ -633,6 +663,12 @@ __global__ void calculate_temp(int iteration,  //number of iteration
     int offset_power_on_cuda = get_offset(ty, tx, 1);
     int offset_temp_t = get_offset(ty, tx, 2);
     int blk = by*blockCols+bx;
+    int totalCompress[1];
+    int totalDiverge[1];
+    int currentCompress[1];
+    totalCompress[0] = 0;
+    totalDiverge[0] = 0;
+    currentCompress[0] = 0;
 
     //printf("ty = %d, tx = %d, bank = %d, offset_temp_on_cuda = %d, offset_power = %d, offset_temp_t = %d, blk = %d\n", ty, tx, bank, offset_temp_on_cuda, offset_power_on_cuda, offset_temp_t, blk);
 
@@ -659,12 +695,15 @@ __global__ void calculate_temp(int iteration,  //number of iteration
 
     
     if ( isOneThreadPerBank(ty)) {
-        approxShmem(approx_shmem, shmemTable, blk, tx, ty, bank, print); 
+        approxShmem(approx_shmem, shmemTable, blk, tx, ty, bank, print, totalCompress, totalDiverge, currentCompress); 
     }
 
     __syncthreads();
     if (blk == 0 && tx == 0 && ty == 0) {
         printShmemTable(shmemTable, bank, blk, tx, ty, approx_shmem);
+        //int num = get_fp8(0.4532);
+        //float hash = get_hash_2(approx_shmem, 0, 6, 1);
+        //printf("num = %d, hash = %f\n", num, hash);
     }
 
     __syncthreads();
@@ -716,7 +755,7 @@ __global__ void calculate_temp(int iteration,  //number of iteration
             __syncthreads();
 
             if(isOneThreadPerBank(ty)){
-                approxShmem(approx_shmem, shmemTable, blk, tx, ty, bank, print); 
+                approxShmem(approx_shmem, shmemTable, blk, tx, ty, bank, print, totalCompress, totalDiverge, currentCompress); 
             }
             __syncthreads();
 
@@ -736,7 +775,7 @@ __global__ void calculate_temp(int iteration,  //number of iteration
             __syncthreads();
 
             if(isOneThreadPerBank(ty)){
-                approxShmem(approx_shmem, shmemTable, blk, tx, ty, bank, print); 
+                approxShmem(approx_shmem, shmemTable, blk, tx, ty, bank, print, totalCompress, totalDiverge, currentCompress); 
             }
             __syncthreads();
 
@@ -794,6 +833,8 @@ __global__ void calculate_temp(int iteration,  //number of iteration
               temp[index]= temp_t[ty][tx];		
           }
     }
+    if (isOneThreadPerBank(ty))
+        printf("blk = %d, bank = %d, totalCompress_addr = %p, TotalCompress = %d, totalDiverge = %d, CurrentCompress = %d\n", blk, bank, totalCompress, totalCompress[0], totalDiverge[0], currentCompress[0]);
 }
 
 /*
