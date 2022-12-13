@@ -89,6 +89,13 @@ __device__ float get_hash(float **approx_shmem, int blk, int bank, int chunk)
     return hash;
 }
 
+/*__device__ float get_hash(float **approx_shmem, int blk, int bank, int chunk)
+{
+    float hash = 0;
+    hash = approx_shmem[blk][bank*SHMEM_ELEMENTS_PER_BANK+(chunk*SHMEM_CHUNK_SIZE+i)];
+    return hash;
+}*/
+
 __device__ void pushQueue(struct queueNode **q, long unsigned int vaddr){
     struct queueNode *newNode = (struct queueNode*)malloc(sizeof(struct queueNode));
     newNode->vaddr = vaddr;
@@ -113,7 +120,7 @@ __device__ int findInQueue(struct queueNode **q, long unsigned int vaddr, int pr
 	while(ptr != NULL)
 	{
         if (print)
-            printf("In findInQueue, index = %d, i = %d, tx = %d, ty= %d, ptr->vaddr = %lx, vaddr = %lx\n", index, i, tx, ty, ptr->vaddr,  vaddr);
+            printf("In findInQueue, index = %d, i = %d, tx = %d, ty= %d, ptr->vaddr = %ld, vaddr = %ld\n", index, i, tx, ty, ptr->vaddr,  vaddr);
 		if(ptr->vaddr == vaddr) 
 			return index;
 		ptr = ptr->next;
@@ -182,7 +189,7 @@ __device__ void printQueue(struct queueNode *q, int i, int tx, int ty)
     struct queueNode *ptr = q;
     //printf("Printing queue i = %d, tx = %d, ty = %d", i, tx, ty);
     while(ptr!=NULL) {
-        printf("%lx,", ptr->vaddr);
+        printf("%ld,", ptr->vaddr);
         ptr = ptr->next;
     }
     //printf("\n");
@@ -265,7 +272,7 @@ __device__ float getApproxShmem(int input_vaddr, int b, float **approx_shmem, st
             }
         }
     }
-    if (blk == 0 && match == 0) {
+    if (match == 0) {
         printf("ERROR: There is no match in the vaddrQueue for reads, chunk = %d, b = %d, tx = %d, ty = %d, input_vaddr = %d, blk = %d\n", chunk, b, tx, ty, input_vaddr, blk);
     }
     //printf("get approxShmem, value = %f\n", value);
@@ -319,7 +326,7 @@ __device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmem
     //FIXED - the hash looks like is being calculated incorrectly. In the third iteration of writes, all the hashes for which there is compression are exactly same. Need to check. Could be related to the problem above
     for (int chunk = 0; chunk < APP_SHMEM_TABLE_ENTRIES_PER_BANK; chunk++){
         if (b == 20 && blk == 0 && print)  {
-            printf("Starting new iteration b = %d, chunk = %d, tx = %d, ty = %d, blk = %d\n", b, chunk, tx, ty, blk);
+            printf("\nStarting new iteration b = %d, chunk = %d, tx = %d, ty = %d, blk = %d\n", b, chunk, tx, ty, blk);
         }
         foundMatch = 0;
         hash_diverged = 0;
@@ -347,6 +354,9 @@ __device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmem
                             //Allocate
                             hash_diverged = 1;
                             diverge_index = i;
+                            if (b == 20 && blk == 0 && print)  {
+                                printf("Hash diverged, b = %d, i = %d, tx = %d, ty = %d, blk = %d, temp_hash = %f\n", b, i, tx, ty, blk, temp_hash);
+                            }
                         }
                     }
                     else {
@@ -366,14 +376,18 @@ __device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmem
             idx = findInQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk, 0, tx, ty, 0);
             
             if (idx == -1) {
-                if (blk == 0)  {
-                    printf("ERROR: Something is wrong since idx cannot be -1 here, blk = %d, bank = %d, tx = %d, ty = %d, i = %d, chunk = %d\n", blk, b, tx, ty, 0, chunk);
-                }
+                //if (blk == 0 && b == 20)  {
+                printf("ERROR: Something is wrong since idx cannot be -1 here, blk = %d, bank = %d, tx = %d, ty = %d, i = %d, chunk = %d\n", blk, b, tx, ty, 0, chunk);
+                //}
             }
             else
             {
                 if(minIdx == idx)
                 {
+                    if (blk == 0 && b == 20 && print)  {
+                        printf("Inside minIdx == idx case - blk = %d, bank = %d, tx = %d, ty = %d, i = %d, chunk = %d, diverge_index = %d\n", blk, b, tx, ty, 0, chunk, diverge_index);
+                    }
+
                     //case 1: minIdx == idx: shift other elements to new min; 
                     int size = sizeQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue);
 
@@ -386,6 +400,11 @@ __device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmem
                     // find new min value in the queue (essentially, the second min value in the original queue) 
                     int newMinIdx = getMinValueIndexQueue(&tempQueue);
                     int shmemEntryIndex = getValueQueue(&tempQueue, newMinIdx);
+                    if (blk == 0 && b == 20 && print)  {
+                        printf("NewMinIdx = %d, shmemEntryIndex = %d, tempQueue=", newMinIdx, shmemEntryIndex);
+                        printQueue(tempQueue, 0, tx, ty);
+                        printf("\n");
+                    }
                     // clear the queue at the existing index and reassign to temp queue
                     clearQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+shmemEntryIndex].vaddrQueue);
                     shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+shmemEntryIndex].vaddrQueue = tempQueue;
@@ -393,19 +412,35 @@ __device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmem
                     shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+shmemEntryIndex].hash[0] = shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].hash[0];
                     shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+shmemEntryIndex].valid = 1;
                     shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+shmemEntryIndex].status = 15;
-                    
 
                     // update the queue of the chunk that diverged: clear existing queue and push chunk addr to queue
                     clearQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue);
                     pushQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk);
                     shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].hash[0] = temp_hash;
+                    if (blk == 0 && b == 20 && print)  {
+                        printf("NewMinIdx = %d, shmemEntryIndex = %d, divergeIndexHash = %f, divergeIndexVaddrQueue=", newMinIdx, shmemEntryIndex, shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].hash[0]);
+                        printQueue(shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, 0, tx, ty);
+                        printf("\n");
+                    }
                 }
                 else
                 {
+
+                    if (blk == 0 && b == 20 && print)  {
+                        printf("Inside minIdx != idx case - blk = %d, bank = %d, tx = %d, ty = %d, i = %d, chunk = %d, diverge_index=%d\n", blk, b, tx, ty, 0, chunk, diverge_index);
+                    }
                     //case 2: minIdx != idx: move idx to original location (chunk) & remove idx from vaddrQueue
                     clearQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+chunk].vaddrQueue);
                     pushQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+chunk].vaddrQueue, chunk);
-                    delFromQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, chunk);
+                    delFromQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, idx);
+                    if (blk == 0 && b == 20 && print)  {
+                        printf("chunk = %d,  chunk indx Queue=", chunk);
+                        printQueue(shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+chunk].vaddrQueue, 0, tx, ty);
+                        printf("\n");
+                        printf("diverge_index = %d,  diverge_index Queue=", diverge_index);
+                        printQueue(shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+diverge_index].vaddrQueue, 0, tx, ty);
+                        printf("\n");
+                    }
 
                     shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+chunk].valid = 1;
                     shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+chunk].status = 15;
@@ -450,6 +485,14 @@ __device__ void approxShmem(float **approx_shmem, struct shmemTableEntry **shmem
                         pushQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, getValueQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+j].vaddrQueue, k));
                     shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+j].valid = 0;
                     clearQueue(&shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+j].vaddrQueue);
+                    if (blk == 0 && b == 20 && print)  {
+                        printf("i =%d, hash= %f, VaddrQueue=", i, shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+i].hash[0]);
+                        printQueue(shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+i].vaddrQueue, 0, tx, ty);
+                        printf("\n");
+                        printf("j =%d, hash= %f, VaddrQueue=", j, shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+j].hash[0]);
+                        printQueue(shmemTable[blk][b*SHMEM_TABLE_NUM_ENTRIES+j].vaddrQueue, 0, tx, ty);
+                        printf("\n");
+                    }
                 }
             }
         }
@@ -542,8 +585,8 @@ __global__ void calculate_temp(int iteration,  //number of iteration
     __shared__ float power_on_cuda[BLOCK_SIZE][BLOCK_SIZE];
     __shared__ float temp_t[BLOCK_SIZE][BLOCK_SIZE]; // saving temparary temperature result
 
-    int APPROX = 1;
-    int print = 1;
+    int APPROX = 0;
+    int print = 0;
 
 	float amb_temp = 80.0;
     float step_div_Cap;
@@ -677,7 +720,7 @@ __global__ void calculate_temp(int iteration,  //number of iteration
             }
             __syncthreads();
 
-            if (bank == 0 && blk == 0 && tx == 0 && ty == 0) {
+            if (bank == 0 && blk == 0 && tx == 0 && ty == 0 && print) {
                 printShmemTable(shmemTable, bank, blk, tx, ty, approx_shmem);
             }
             
@@ -697,7 +740,7 @@ __global__ void calculate_temp(int iteration,  //number of iteration
             }
             __syncthreads();
 
-            if (bank == 0 && blk == 0 && tx == 0 && ty == 0) {
+            if (bank == 0 && blk == 0 && tx == 0 && ty == 0 && print) {
                 printShmemTable(shmemTable, bank, blk, tx, ty, approx_shmem);
             }
           }
